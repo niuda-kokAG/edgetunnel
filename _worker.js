@@ -7,6 +7,8 @@ const WS早期数据最大字节 = 8 * 1024, WS早期数据最大头长度 = Mat
 const 上行合包目标字节 = 20 * 1024, 上行队列最大字节 = 16 * 1024 * 1024, 上行队列最大条目 = 4096;
 const 下行Grain包字节 = 32 * 1024, 下行Grain尾部阈值 = 512, 下行Grain低水位字节 = Math.max(4096, 下行Grain尾部阈值 * 12), 下行Grain最大等待轮次 = 4;
 let TCP并发拨号数 = 2, 反代并发拨号数 = 1, 预加载竞速拨号 = false;
+const 内存缓存 = new Map();
+const 内存缓存TTL = { CIDR: 12 * 60 * 60 * 1000, 用量: 10 * 60 * 1000, 静态页: 60 * 60 * 1000 };
 ///////////////////////////////////////////////////////查杀特征码///////////////////////////////////////////////
 const 特征码字典 = [
 	(Proxy.name + "IP").toUpperCase(),
@@ -80,7 +82,7 @@ export default {
 			return await 处理叉HTTP请求(request, userID, 反代上下文);
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
-			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
+			if (!管理员密码) { const 静态页 = await 获取静态提示页('/noADMIN'); const headers = new Headers(静态页.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(静态页.body, { status: 404, statusText: 静态页.statusText, headers }) }
 			if (env.KV && typeof env.KV.get === 'function') {
 				const 区分大小写访问路径 = url.pathname.slice(1);
 				if (区分大小写访问路径 === 加密秘钥 && 加密秘钥 !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {//快速订阅
@@ -102,7 +104,8 @@ export default {
 							return 响应;
 						}
 					}
-					return fetch(Pages静态页面 + '/login');
+					const 静态页 = await 获取静态提示页('/login');
+					return new Response(静态页.body, { status: 静态页.status, statusText: 静态页.statusText, headers: 静态页.headers });
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
@@ -498,7 +501,7 @@ export default {
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (authCookie && authCookie == await MD5MD5(UA + 加密秘钥 + 管理员密码)) return fetch(new Request('https://speed.cloudflare.com/locations', { headers: { 'Referer': 'https://speed.cloudflare.com/' } }));
 				} else if (访问路径 === 'robots.txt') return new Response('User-agent: *\nDisallow: /', { status: 200, headers: { 'Content-Type': 'text/plain; charset=UTF-8' } });
-			} else if (!envUUID) return fetch(Pages静态页面 + '/noKV').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
+			} else if (!envUUID) { const 静态页 = await 获取静态提示页('/noKV'); const headers = new Headers(静态页.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(静态页.body, { status: 404, statusText: 静态页.statusText, headers }) }
 		}
 
 		let 伪装页URL = env.URL || 'nginx';
@@ -509,6 +512,8 @@ export default {
 			try { const u = new URL(伪装页URL); 伪装页URL = u.protocol + '//' + u.host } catch (e) { 伪装页URL = 'nginx' }
 		}
 		if (伪装页URL === '1101') return new Response(await html1101(url.host, 访问IP), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
+		const 探测路径正则 = /(^|\/)(favicon\.ico|\.env|\.git(\/|$)|wp-admin|wp-login\.php|wp-content|xmlrpc\.php|administrator|admin\.php|phpmyadmin|cgi-bin|server-status|server-info|\.well-known(\/|$)|actuator(\/|$)|api-docs(\/|$)|swagger|\.aws(\/|$)|\.ssh(\/|$)|\.svn(\/|$))|\.(php|asp|aspx|jsp|jspx|asmx|ashx)(\?|$)/i;
+		if (探测路径正则.test(url.pathname)) return new Response(await nginx(), { status: 404, headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
 		try {
 			const 反代URL = new URL(伪装页URL), 新请求头 = new Headers(request.headers);
 			新请求头.set('Host', 反代URL.host);
@@ -5816,10 +5821,14 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 			await env.KV.put('cf.json', JSON.stringify(初始化CF_JSON, null, 2));
 		} else {
 			const CF_JSON = JSON.parse(CF_TXT);
-			if (CF_JSON.UsageAPI) {
+			const 用量缓存项 = 内存缓存.get('CF_Usage');
+			if (用量缓存项 && Date.now() - 用量缓存项.time < 内存缓存TTL.用量) {
+				config_JSON.CF.Usage = 用量缓存项.data;
+			} else if (CF_JSON.UsageAPI) {
 				try {
 					const response = await fetch(CF_JSON.UsageAPI);
 					const Usage = await response.json();
+					内存缓存.set('CF_Usage', { time: Date.now(), data: Usage });
 					config_JSON.CF.Usage = Usage;
 				} catch (err) {
 					console.error(`请求 CF_JSON.UsageAPI 失败: ${err.message}`);
@@ -5831,6 +5840,7 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 				config_JSON.CF.APIToken = CF_JSON.APIToken ? 掩码敏感信息(CF_JSON.APIToken) : null;
 				config_JSON.CF.UsageAPI = null;
 				const Usage = await getCloudflareUsage(CF_JSON.Email, CF_JSON.GlobalAPIKey, CF_JSON.AccountID, CF_JSON.APIToken);
+				内存缓存.set('CF_Usage', { time: Date.now(), data: Usage });
 				config_JSON.CF.Usage = Usage;
 			}
 		}
@@ -5886,7 +5896,14 @@ async function 生成随机IP(request, count = 16, 指定端口 = -1) {
 	const cfname = 运营商名称映射[运营商文件标识] || 'CF官方优选';
 	const cfport = [443, 2053, 2083, 2087, 2096, 8443];
 	let cidrList = [];
-	try { const res = await fetch(cidr_url); cidrList = res.ok ? await 整理成数组(await res.text()) : ['104.16.0.0/13'] } catch { cidrList = ['104.16.0.0/13'] }
+	const 缓存键 = 'CIDR_' + 运营商文件标识;
+	const CIDR缓存项 = 内存缓存.get(缓存键);
+	if (CIDR缓存项 && Date.now() - CIDR缓存项.time < 内存缓存TTL.CIDR) {
+		cidrList = CIDR缓存项.data;
+	} else {
+		try { const res = await fetch(cidr_url); cidrList = res.ok ? await 整理成数组(await res.text()) : ['104.16.0.0/13'] } catch { cidrList = ['104.16.0.0/13'] }
+		内存缓存.set(缓存键, { time: Date.now(), data: cidrList });
+	}
 
 	const generateRandomIPFromCIDR = (cidr) => {
 		const [baseIP, prefixLength] = cidr.split('/'), prefix = parseInt(prefixLength), hostBits = 32 - prefix;
@@ -5903,6 +5920,21 @@ async function 生成随机IP(request, count = 16, 指定端口 = -1) {
 		return `${ip}:${目标端口}#${cfname}${index + 1}`;
 	});
 	return [randomIPs, randomIPs.join('\n')];
+}
+
+async function 获取静态提示页(路径) {
+	const 缓存键 = 'STATIC_' + 路径;
+	const 缓存项 = 内存缓存.get(缓存键);
+	if (缓存项 && Date.now() - 缓存项.time < 内存缓存TTL.静态页) return 缓存项.data;
+	try {
+		const r = await fetch(Pages静态页面 + 路径);
+		const 数据 = { status: r.status, statusText: r.statusText, headers: new Headers(r.headers), body: await r.text() };
+		内存缓存.set(缓存键, { time: Date.now(), data: 数据 });
+		return 数据;
+	} catch (e) {
+		console.error(`获取静态页 ${路径} 失败: ${e.message}`);
+		return { status: 404, statusText: 'Not Found', headers: new Headers({ 'Content-Type': 'text/html; charset=utf-8' }), body: '' };
+	}
 }
 
 async function 整理成数组(内容) {
